@@ -3216,7 +3216,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _drain_job_queues(self, job):
-        """Drain stdout/stderr queues for a running subprocess job."""
+        """Drain stdout/stderr queues for a running job."""
         import queue
         while True:
             try:
@@ -3230,6 +3230,31 @@ class MainWindow(QMainWindow):
                 job["err_lines"].append(line)
             except queue.Empty:
                 break
+
+    def _is_job_running(self, job):
+        """Return True if the job (subprocess or thread) is still running."""
+        if "thread" in job:
+            return job["thread"].is_alive() and not job.get("done")
+        return job["proc"].poll() is None
+
+    def _kill_job(self, job):
+        """Kill a subprocess job. Threads can't be force-killed."""
+        if "proc" in job:
+            try:
+                job["proc"].kill()
+            except Exception:
+                pass
+            try:
+                job["t_out"].join(timeout=2)
+                job["t_err"].join(timeout=2)
+            except Exception:
+                pass
+
+    def _get_job_retcode(self, job):
+        """Get return code: proc.returncode or thread retcode."""
+        if "proc" in job:
+            return job["proc"].returncode
+        return job.get("retcode", 1)
 
     def _get_jagex_session(self):
         if not self.selected_ids:
@@ -3315,10 +3340,7 @@ class MainWindow(QMainWindow):
                 if progress.wasCanceled():
                     for b in batch:
                         if b["job"]["status"] == "running":
-                            try:
-                                b["job"]["proc"].kill()
-                            except Exception:
-                                pass
+                            self._kill_job(b["job"])
                             b["job"]["status"] = "canceled"
                     break
 
@@ -3327,14 +3349,10 @@ class MainWindow(QMainWindow):
                     if b["job"]["status"] != "running":
                         continue
                     self._drain_job_queues(b["job"])
-                    proc = b["job"]["proc"]
-                    if proc.poll() is None:
+                    if self._is_job_running(b["job"]):
                         # Still running — check timeout
                         if time.time() - b["job"]["start_t"] > 120:
-                            try:
-                                proc.kill()
-                            except Exception:
-                                pass
+                            self._kill_job(b["job"])
                             b["job"]["status"] = "timeout"
                             failed += 1
                             completed += 1
@@ -3342,15 +3360,14 @@ class MainWindow(QMainWindow):
                             print(f"[SESSION BATCH] Timeout for {b['nick']}")
                     else:
                         # Finished — collect remaining output
-                        b["job"]["t_out"].join(timeout=2)
-                        b["job"]["t_err"].join(timeout=2)
                         self._drain_job_queues(b["job"])
                         stdout = "\n".join(b["job"]["out_lines"])
                         stderr = "\n".join(b["job"]["err_lines"])
+                        retcode = self._get_job_retcode(b["job"])
                         with open(b["job"]["log_file"], "w") as f:
-                            f.write(f"EXIT CODE: {proc.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}")
+                            f.write(f"EXIT CODE: {retcode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}")
                         got_success = "=== SUCCESS ===" in stdout
-                        if proc.returncode == 0 or got_success:
+                        if retcode == 0 or got_success:
                             b["job"]["status"] = "done_ok"
                             success += 1
                             # Post-success hooks
@@ -3370,7 +3387,7 @@ class MainWindow(QMainWindow):
                         else:
                             b["job"]["status"] = "done_fail"
                             failed += 1
-                            print(f"[SESSION BATCH] Failed for {b['nick']} (exit {proc.returncode})")
+                            print(f"[SESSION BATCH] Failed for {b['nick']} (exit {retcode})")
                         completed += 1
                         progress.setValue(completed)
                 time.sleep(0.05)
