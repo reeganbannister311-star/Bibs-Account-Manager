@@ -52,16 +52,21 @@ def write_local_version(tag: str) -> None:
     VERSION_FILE.write_text(tag)
 
 
-def fetch_latest_release() -> dict | None:
+def fetch_latest_release() -> tuple[dict | None, str]:
+    """Fetch latest release. Returns (release_dict, error_message)."""
     req = urllib.request.Request(
         GITHUB_API,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "BibsLauncher/1.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+            return json.loads(resp.read().decode()), ""
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None, "No releases found on GitHub. Publish a release first."
+        return None, f"GitHub returned HTTP {e.code}"
     except Exception as e:
-        return None
+        return None, str(e)
 
 
 def find_asset(assets: list, name: str) -> dict | None:
@@ -209,11 +214,17 @@ class LauncherGUI:
         self.set_version(f"Installed: v{local_version}")
         self.set_status("Checking GitHub for updates...")
 
-        release = fetch_latest_release()
+        release, err = fetch_latest_release()
         if not release:
-            self.set_status("GitHub unreachable — launching existing install", WARN)
-            self.set_detail("No internet connection or API rate limit")
-            self.root.after(2000, self._launch)
+            self.set_status("Update check failed", ERROR)
+            self.set_detail(err or "No internet connection")
+            if EXE_PATH.exists():
+                self.root.after(3000, self._launch)
+            else:
+                self.root.after(3000, lambda: self._fatal(
+                    "No release found and no local install.\n"
+                    "Publish a release on GitHub or place the app in the App/ folder."
+                ))
             return
 
         remote_tag = release.get("tag_name", "0.0.0").lstrip("v")
@@ -264,12 +275,17 @@ class LauncherGUI:
         self.set_progress(100)
         self.root.after(1500, self._launch)
 
+    def _fatal(self, msg: str):
+        messagebox.showerror("Launcher Error", msg)
+        self.root.destroy()
+
     def _launch(self):
         if not EXE_PATH.exists():
-            self.set_status(f"Manager not found at {EXE_PATH}", ERROR)
-            self.set_detail("Please check your installation.")
-            messagebox.showerror("Error", f"Manager executable not found:\n{EXE_PATH}")
-            self.root.destroy()
+            self._fatal(
+                f"Manager executable not found:\n{EXE_PATH}\n\n"
+                "Run the launcher from its installed folder (not from a ZIP/RAR).\n"
+                "It will auto-download the app on first run if a GitHub release exists."
+            )
             return
 
         self.set_status("Launching Farm Manager...", SUCCESS)
@@ -289,9 +305,16 @@ def console_main():
     local_version = read_local_version()
     print(f"[LAUNCHER] Installed version: {local_version}")
 
-    release = fetch_latest_release()
+    release, err = fetch_latest_release()
     if not release:
-        print("[LAUNCHER] Could not reach GitHub. Launching existing install ...")
+        print(f"[LAUNCHER] {err or 'Could not reach GitHub'}")
+        if EXE_PATH.exists():
+            print("[LAUNCHER] Launching existing install ...")
+        else:
+            print(f"[LAUNCHER] ERROR: No release found and no local install.")
+            print("[LAUNCHER] Run from the install folder (not from ZIP/RAR).")
+            input("Press Enter to exit...")
+            sys.exit(1)
     else:
         remote_tag = release.get("tag_name", "0.0.0").lstrip("v")
         print(f"[LAUNCHER] Latest release: v{remote_tag}")
@@ -321,6 +344,7 @@ def console_main():
 
     if not EXE_PATH.exists():
         print(f"[LAUNCHER] ERROR: Manager not found at {EXE_PATH}")
+        print("[LAUNCHER] Run from the install folder (not from ZIP/RAR).")
         input("Press Enter to exit...")
         sys.exit(1)
 
