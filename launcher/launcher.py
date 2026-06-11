@@ -16,7 +16,7 @@ from pathlib import Path
 # ── Configuration ──────────────────────────────────────────────────
 GITHUB_API = "https://api.github.com/repos/reeganbannister311-star/Bibs-Account-Manager/releases/latest"
 ZIP_ASSET_NAME = "BibsAccountManager.zip"
-JAR_ASSET_NAME = "DreamBotScript.jar"
+JAR_ASSET_NAME = "BankCacheBootstrapper.jar"
 EXE_NAME = "BibsAccountManager.exe"
 
 # Paths relative to launcher.exe
