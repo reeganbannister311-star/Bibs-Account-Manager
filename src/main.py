@@ -3575,6 +3575,7 @@ class MainWindow(QMainWindow):
         try:
             from jagex_account_creator import models, utils
             from jagex_account_creator.account_creator_selenium import AccountCreatorSelenium
+            import get_jagex_session
         except Exception as e:
             self._creator_log_append(f"[ERROR] Failed to import account creator: {e}")
             self._creator_log_append("[ERROR] Make sure all dependencies are installed (selenium, undetected-chromedriver, pyotp, imap-tools, wreq, loguru, pydantic, platformdirs).")
@@ -3695,6 +3696,29 @@ class MainWindow(QMainWindow):
                             f.write(line + "\n")
                     except Exception as file_err:
                         self._creator_log_append(f"[{i+1}/{count}] Warning: could not write to accounts file: {file_err}")
+
+                    # Cache Jagex session ID immediately after creation
+                    try:
+                        self._creator_log_append(f"[{i+1}/{count}] Getting Jagex session...")
+                        proxy_dict = None
+                        if proxy:
+                            proxy_dict = {
+                                "host": proxy.ip,
+                                "port": proxy.port,
+                                "username": proxy.username or "",
+                                "password": proxy.password or "",
+                            }
+                        get_jagex_session.main(aid, show_browser=False, proxy=proxy_dict)
+                        acc_after = self.db.get_account(aid)
+                        sid = acc_after.get("session_id", "") if acc_after else ""
+                        cid = acc_after.get("character_id", "") if acc_after else ""
+                        if sid:
+                            self._creator_log_append(f"[{i+1}/{count}] Session cached: {sid[:20]}... char_id={cid}")
+                        else:
+                            self._creator_log_append(f"[{i+1}/{count}] Session grab returned no session ID")
+                    except Exception as sess_err:
+                        self._creator_log_append(f"[{i+1}/{count}] Session grab failed: {sess_err}")
+
                     created += 1
                 else:
                     self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address}")

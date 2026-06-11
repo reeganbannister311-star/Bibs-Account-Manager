@@ -46,6 +46,7 @@ def build():
         "--hidden-import", "jagex_account_creator.account_creator_camofox",
         "--hidden-import", "jagex_account_creator.camofox_client",
         "--hidden-import", "jagex_account_creator.gproxy",
+        "--hidden-import", "get_jagex_session",
         str(PROJECT_ROOT / "src" / "main.py"),
     ]
     subprocess.check_call(cmd)
