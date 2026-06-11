@@ -301,8 +301,11 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 class MainWindow(QMainWindow):
+    creator_log_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
+        self.creator_log_signal.connect(self._creator_log_slot)
         self.db = FarmDB()
         self.settings = QSettings("BibsFarm","Settings")
         self.selected_ids = []
@@ -3511,14 +3514,14 @@ class MainWindow(QMainWindow):
         self.creator_imap_widget.setVisible(text == "IMAP")
         self.creator_gmail_widget.setVisible(text == "Gmail Web")
 
+    def _creator_log_slot(self, message):
+        self.creator_log.append(message)
+        sb = self.creator_log.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
+
     def _creator_log_append(self, message):
-        def _append():
-            self.creator_log.append(message)
-            sb = self.creator_log.verticalScrollBar()
-            if sb:
-                sb.setValue(sb.maximum())
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, _append)
+        self.creator_log_signal.emit(message)
 
     def _start_account_creation(self):
         self.btn_creator_start.setEnabled(False)

@@ -18,7 +18,10 @@ EXE_NAME = "BibsAccountManager.exe"
 def clean():
     for d in [BUILD_DIR, DIST_DIR]:
         if d.exists():
-            shutil.rmtree(d)
+            try:
+                shutil.rmtree(d)
+            except PermissionError:
+                pass  # may be locked by running EXE
         d.mkdir(parents=True, exist_ok=True)
 
 def build():
