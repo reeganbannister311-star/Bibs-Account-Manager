@@ -3680,7 +3680,7 @@ class MainWindow(QMainWindow):
                     display_name="",
                     jagex_account=1,
                     proxy_id=proxy_id,
-                    category="Ready To Farm",
+                    category="Uncategorized",
                     status="Offline",
                     notes=f"Created by Account Creator | Birthday: {account.birthday.day}/{account.birthday.month}/{account.birthday.year}",
                 )
