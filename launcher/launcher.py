@@ -10,6 +10,7 @@ import shutil
 import zipfile
 import subprocess
 import threading
+import ssl
 import urllib.request
 from pathlib import Path
 
@@ -72,6 +73,14 @@ def fmt_size(n: int) -> str:
     return f"{n:.1f}TB"
 
 
+def _ssl_context():
+    """Return an unverified SSL context for machines with broken certs."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def fetch_latest_release() -> tuple[dict | None, str]:
     """Fetch latest release. Returns (release_dict, error_message)."""
     req = urllib.request.Request(
@@ -85,6 +94,15 @@ def fetch_latest_release() -> tuple[dict | None, str]:
         if e.code == 404:
             return None, "No releases found on GitHub. Publish a release first."
         return None, f"GitHub returned HTTP {e.code}"
+    except urllib.error.URLError as e:
+        err_str = str(e)
+        if "CERTIFICATE_VERIFY_FAILED" in err_str or "SSL" in err_str:
+            try:
+                with urllib.request.urlopen(req, timeout=15, context=_ssl_context()) as resp:
+                    return json.loads(resp.read().decode()), ""
+            except Exception as e2:
+                return None, f"SSL certificate error. Update Python or install certificates: {e2}"
+        return None, err_str
     except Exception as e:
         return None, str(e)
 
@@ -97,9 +115,19 @@ def find_asset(assets: list, name: str) -> dict | None:
 
 
 def download_file(url: str, dest: Path, progress_cb=None) -> bool:
+    def _open(req, ctx=None):
+        return urllib.request.urlopen(req, timeout=300, context=ctx)
+
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "BibsLauncher/1.0"})
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        try:
+            resp = _open(req)
+        except urllib.error.URLError as e:
+            if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSL" in str(e):
+                resp = _open(req, _ssl_context())
+            else:
+                raise
+        with resp as resp:
             total = int(resp.headers.get("Content-Length", 0))
             chunk_size = 262144  # 256KB chunks
             data = b""
