@@ -3651,7 +3651,8 @@ class MainWindow(QMainWindow):
                     notes=f"Created by Account Creator | Birthday: {account.birthday.day}/{account.birthday.month}/{account.birthday.year}",
                 )
                 if aid:
-                    self._creator_log_append(f"[{i+1}/{count}] Created: {account.email.address} (ID {aid})")
+                    totp_part = account.tfa.setup_key if account.tfa else ""
+                    self._creator_log_append(f"[{i+1}/{count}] Created: {account.email.address}:{account.password}:{totp_part}")
                     created += 1
                 else:
                     self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address}")
