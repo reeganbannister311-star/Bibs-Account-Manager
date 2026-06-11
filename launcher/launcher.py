@@ -53,12 +53,17 @@ def write_local_version(tag: str) -> None:
     VERSION_FILE.write_text(tag)
 
 
+# WARNING: This token is baked in for convenience so users don't need a token.txt file.
+# If you ever need to rotate it, create a token.txt next to launcher.py and it will override this.
+HARDCODED_TOKEN = "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"
+
+
 def read_token() -> str | None:
     if TOKEN_FILE.exists():
         token = TOKEN_FILE.read_text().strip()
         if token:
             return token
-    return None
+    return HARDCODED_TOKEN
 
 
 def fetch_latest_release() -> tuple[dict | None, str]:
