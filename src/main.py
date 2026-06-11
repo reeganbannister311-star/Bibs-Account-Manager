@@ -3631,17 +3631,32 @@ class MainWindow(QMainWindow):
         created = 0
         failed = 0
         i = 0
+        retry_count = 0
+        max_retries = 3
+
+        # Debug log file
+        import pathlib, traceback as _tb
+        debug_log_path = os.path.join(os.path.expanduser("~"), "DreamBot", "BotData", "creator_debug.log")
+        pathlib.Path(debug_log_path).parent.mkdir(parents=True, exist_ok=True)
+        def _debug_log(msg):
+            try:
+                with open(debug_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+            except Exception:
+                pass
 
         while i < count:
             if self._creator_stop_event.is_set():
                 self._creator_log_append("[ACCOUNT CREATOR] Stopped by user.")
+                _debug_log("Stopped by user")
                 break
 
             proxy = None
             if proxies:
                 proxy = proxies[i % len(proxies)]
 
-            self._creator_log_append(f"[{i+1}/{count}] Creating account...")
+            self._creator_log_append(f"[{i+1}/{count}] Creating account... (attempt {retry_count + 1}/{max_retries + 1})")
+            _debug_log(f"Account {i+1}/{count} attempt {retry_count + 1}")
             try:
                 ac = AccountCreatorSelenium(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
@@ -3688,9 +3703,9 @@ class MainWindow(QMainWindow):
                     totp_part = account.tfa.setup_key if account.tfa else ""
                     line = f"{account.email.address}:{account.password}:{totp_part}"
                     self._creator_log_append(f"[{i+1}/{count}] Created: {line}")
+                    _debug_log(f"Created: {account.email.address}")
                     # Append to accounts_created.txt
                     try:
-                        import pathlib
                         accounts_file = os.path.join(os.path.expanduser("~"), "DreamBot", "BotData", "accounts_created.txt")
                         pathlib.Path(accounts_file).parent.mkdir(parents=True, exist_ok=True)
                         with open(accounts_file, "a", encoding="utf-8") as f:
@@ -3698,7 +3713,7 @@ class MainWindow(QMainWindow):
                     except Exception as file_err:
                         self._creator_log_append(f"[{i+1}/{count}] Warning: could not write to accounts file: {file_err}")
 
-                    # Cache Jagex session ID immediately after creation
+                    # Cache Jagex session ID immediately after creation (with timeout)
                     try:
                         self._creator_log_append(f"[{i+1}/{count}] Getting Jagex session...")
                         proxy_dict = None
@@ -3709,27 +3724,60 @@ class MainWindow(QMainWindow):
                                 "username": proxy.username or "",
                                 "password": proxy.password or "",
                             }
-                        get_jagex_session.main(aid, show_browser=False, proxy=proxy_dict)
-                        acc_after = self.db.get_account(aid)
-                        sid = acc_after.get("session_id", "") if acc_after else ""
-                        cid = acc_after.get("character_id", "") if acc_after else ""
-                        if sid:
-                            self._creator_log_append(f"[{i+1}/{count}] Session cached: {sid[:20]}... char_id={cid}")
+                        _sess_result = [None]
+                        _sess_err = [None]
+                        def _get_session():
+                            try:
+                                get_jagex_session.main(aid, show_browser=False, proxy=proxy_dict)
+                                _sess_result[0] = True
+                            except Exception as se:
+                                _sess_err[0] = se
+                        _sess_thread = threading.Thread(target=_get_session, daemon=True)
+                        _sess_thread.start()
+                        _sess_thread.join(timeout=120)
+                        if _sess_thread.is_alive():
+                            self._creator_log_append(f"[{i+1}/{count}] Session grab timed out after 120s, skipping...")
+                            _debug_log("Session grab timed out after 120s")
+                        elif _sess_err[0]:
+                            raise _sess_err[0]
                         else:
-                            self._creator_log_append(f"[{i+1}/{count}] Session grab returned no session ID")
+                            acc_after = self.db.get_account(aid)
+                            sid = acc_after.get("session_id", "") if acc_after else ""
+                            cid = acc_after.get("character_id", "") if acc_after else ""
+                            if sid:
+                                self._creator_log_append(f"[{i+1}/{count}] Session cached: {sid[:20]}... char_id={cid}")
+                            else:
+                                self._creator_log_append(f"[{i+1}/{count}] Session grab returned no session ID")
                     except Exception as sess_err:
                         self._creator_log_append(f"[{i+1}/{count}] Session grab failed: {sess_err}")
+                        _debug_log(f"Session grab failed: {sess_err}")
 
                     created += 1
                     i += 1  # Only advance on success
+                    retry_count = 0  # Reset retry counter
                 else:
                     self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address} — retrying...")
+                    _debug_log(f"DB duplicate: {account.email.address}")
                     failed += 1
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        self._creator_log_append(f"[{i+1}/{count}] Max retries reached, skipping account.")
+                        _debug_log("Max retries reached on DB duplicate, skipping")
+                        i += 1
+                        retry_count = 0
                     time.sleep(5)
 
             except Exception as e:
-                self._creator_log_append(f"[{i+1}/{count}] Failed: {e} — retrying...")
+                err_msg = str(e)
+                self._creator_log_append(f"[{i+1}/{count}] Failed: {err_msg} — retrying...")
+                _debug_log(f"Failed: {err_msg}\n{_tb.format_exc()}")
                 failed += 1
+                retry_count += 1
+                if retry_count > max_retries:
+                    self._creator_log_append(f"[{i+1}/{count}] Max retries reached, skipping account.")
+                    _debug_log("Max retries reached, skipping account")
+                    i += 1
+                    retry_count = 0
                 time.sleep(5)
 
         self._creator_log_append(f"[ACCOUNT CREATOR] Done. Created: {created}, Failed: {failed}")
