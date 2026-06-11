@@ -64,6 +64,14 @@ def write_local_version(tag: str) -> None:
     VERSION_FILE.write_text(tag)
 
 
+def fmt_size(n: int) -> str:
+    for unit in ["B", "KB", "MB", "GB"]:
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
 def fetch_latest_release() -> tuple[dict | None, str]:
     """Fetch latest release. Returns (release_dict, error_message)."""
     req = urllib.request.Request(
@@ -91,7 +99,7 @@ def find_asset(assets: list, name: str) -> dict | None:
 def download_file(url: str, dest: Path, progress_cb=None) -> bool:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "BibsLauncher/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             chunk_size = 8192
             data = b""
@@ -254,7 +262,9 @@ class LauncherGUI:
         # 1) Download & extract ZIP
         zip_asset = find_asset(assets, ZIP_ASSET_NAME)
         if zip_asset:
-            self.set_detail(f"Downloading {ZIP_ASSET_NAME} ...")
+            size = zip_asset.get("size", 0)
+            size_str = fmt_size(size) if size else ""
+            self.set_detail(f"Downloading {ZIP_ASSET_NAME} {size_str}...")
             zip_path = LAUNCHER_DIR / ZIP_ASSET_NAME
             ok = download_file(
                 zip_asset["browser_download_url"], zip_path,
@@ -270,7 +280,9 @@ class LauncherGUI:
         # 2) Download & install JAR
         jar_asset = find_asset(assets, JAR_ASSET_NAME)
         if jar_asset:
-            self.set_detail(f"Downloading {JAR_ASSET_NAME} ...")
+            jsize = jar_asset.get("size", 0)
+            jsize_str = fmt_size(jsize) if jsize else ""
+            self.set_detail(f"Downloading {JAR_ASSET_NAME} {jsize_str}...")
             jar_path = LAUNCHER_DIR / JAR_ASSET_NAME
             ok = download_file(
                 jar_asset["browser_download_url"], jar_path,
