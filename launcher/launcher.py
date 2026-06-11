@@ -29,7 +29,6 @@ EXE_NAME = "BibsAccountManager.exe"
 
 LAUNCHER_DIR = Path(__file__).parent.resolve()
 VERSION_FILE = LAUNCHER_DIR / "version.txt"
-TOKEN_FILE = LAUNCHER_DIR / "token.txt"
 APP_DIR = LAUNCHER_DIR / "App"
 EXE_PATH = APP_DIR / EXE_NAME
 DREAMBOT_SCRIPTS = Path(os.path.expandvars(r"%USERPROFILE%\DreamBot\Scripts"))
@@ -53,34 +52,18 @@ def write_local_version(tag: str) -> None:
     VERSION_FILE.write_text(tag)
 
 
-# WARNING: This token is baked in for convenience so users don't need a token.txt file.
-# If you ever need to rotate it, create a token.txt next to launcher.py and it will override this.
-HARDCODED_TOKEN = "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"
-
-
-def read_token() -> str | None:
-    if TOKEN_FILE.exists():
-        token = TOKEN_FILE.read_text().strip()
-        if token:
-            return token
-    return HARDCODED_TOKEN
-
-
 def fetch_latest_release() -> tuple[dict | None, str]:
     """Fetch latest release. Returns (release_dict, error_message)."""
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "BibsLauncher/1.0"}
-    token = read_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(GITHUB_API, headers=headers)
+    req = urllib.request.Request(
+        GITHUB_API,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "BibsLauncher/1.0"},
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode()), ""
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None, "No releases found on GitHub. Publish a release first."
-        if e.code == 401:
-            return None, "GitHub authentication failed. Check your token.txt."
         return None, f"GitHub returned HTTP {e.code}"
     except Exception as e:
         return None, str(e)
@@ -95,11 +78,7 @@ def find_asset(assets: list, name: str) -> dict | None:
 
 def download_file(url: str, dest: Path, progress_cb=None) -> bool:
     try:
-        headers = {"User-Agent": "BibsLauncher/1.0"}
-        token = read_token()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, headers={"User-Agent": "BibsLauncher/1.0"})
         with urllib.request.urlopen(req, timeout=60) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             chunk_size = 8192
