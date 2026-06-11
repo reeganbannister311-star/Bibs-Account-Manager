@@ -20,6 +20,7 @@ Powershell command.txt
 !requirements.txt
 !README.md
 !BUILD_SCRIPT.md
+!launcher/version.txt
 
 # =============================
 # NEVER COMMIT: Environments & Build Artifacts
