@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 # ── Configuration ──────────────────────────────────────────────────
-GITHUB_API = "https://api.github.com/repos/reeganbannister311-star/Bibs-Account-Manager/releases/latest"
+GITHUB_API = "https://api.github.com/repos/reeganbannister311-star/Farm-Manger-App/releases/latest"
 ZIP_ASSET_NAME = "BibsAccountManager.zip"
 JAR_ASSET_NAME = "BankCacheBootstrapper.jar"
 EXE_NAME = "BibsAccountManager.exe"
