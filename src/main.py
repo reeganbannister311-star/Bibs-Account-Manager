@@ -3652,7 +3652,17 @@ class MainWindow(QMainWindow):
                 )
                 if aid:
                     totp_part = account.tfa.setup_key if account.tfa else ""
-                    self._creator_log_append(f"[{i+1}/{count}] Created: {account.email.address}:{account.password}:{totp_part}")
+                    line = f"{account.email.address}:{account.password}:{totp_part}"
+                    self._creator_log_append(f"[{i+1}/{count}] Created: {line}")
+                    # Append to accounts_created.txt
+                    try:
+                        import pathlib
+                        accounts_file = os.path.join(os.path.expanduser("~"), "DreamBot", "BotData", "accounts_created.txt")
+                        pathlib.Path(accounts_file).parent.mkdir(parents=True, exist_ok=True)
+                        with open(accounts_file, "a", encoding="utf-8") as f:
+                            f.write(line + "\n")
+                    except Exception as file_err:
+                        self._creator_log_append(f"[{i+1}/{count}] Warning: could not write to accounts file: {file_err}")
                     created += 1
                 else:
                     self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address}")
@@ -3664,7 +3674,9 @@ class MainWindow(QMainWindow):
 
         self._creator_log_append(f"[ACCOUNT CREATOR] Done. Created: {created}, Failed: {failed}")
         def _done():
-            self._refresh_all()
+            self._refresh_sidebar()
+            self._refresh_overview()
+            self._refresh_table()
             self.btn_creator_start.setEnabled(True)
             self.btn_creator_stop.setEnabled(False)
         from PyQt6.QtCore import QTimer
