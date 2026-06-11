@@ -35,6 +35,14 @@ def build():
         "--distpath", str(DIST_DIR / "BibsAccountManager"),
         "--workpath", str(BUILD_DIR),
         "--specpath", str(BUILD_DIR),
+        "--hidden-import", "jagex_account_creator",
+        "--hidden-import", "jagex_account_creator.models",
+        "--hidden-import", "jagex_account_creator.utils",
+        "--hidden-import", "jagex_account_creator.account_creator_selenium",
+        "--hidden-import", "jagex_account_creator.account_creator",
+        "--hidden-import", "jagex_account_creator.account_creator_camofox",
+        "--hidden-import", "jagex_account_creator.camofox_client",
+        "--hidden-import", "jagex_account_creator.gproxy",
         str(PROJECT_ROOT / "src" / "main.py"),
     ]
     subprocess.check_call(cmd)

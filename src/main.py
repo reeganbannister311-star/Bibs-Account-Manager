@@ -3526,7 +3526,35 @@ class MainWindow(QMainWindow):
         self.creator_log.clear()
         self._creator_log_append("[ACCOUNT CREATOR] Starting...")
         self._creator_stop_event = threading.Event()
-        t = threading.Thread(target=self._creator_thread_worker, daemon=True)
+
+        # Capture all Qt widget values on the main thread (Qt is not thread-safe)
+        provider_text = self.cb_creator_provider.currentText()
+        count = self.spin_creator_count.value()
+        use_proxies = self.cb_creator_proxies.isChecked()
+        set_2fa = self.cb_creator_2fa.isChecked()
+        headless = self.cb_creator_headless.isChecked()
+
+        # Provider-specific settings
+        imap_server = self.creator_imap_server.text()
+        imap_port = self.creator_imap_port.text()
+        imap_email = self.creator_imap_email.text()
+        imap_password = self.creator_imap_password.text()
+        imap_domain = self.creator_imap_domain.text()
+        gmail_email = self.creator_gmail_email.text()
+        gmail_domain = self.creator_gmail_domain.text()
+        guerrilla_domain = self.creator_guerrilla_domain.text()
+        xitroo_domain = self.creator_xitroo_domain.text()
+
+        t = threading.Thread(
+            target=self._creator_thread_worker,
+            args=(
+                provider_text, count, use_proxies, set_2fa, headless,
+                imap_server, imap_port, imap_email, imap_password, imap_domain,
+                gmail_email, gmail_domain,
+                guerrilla_domain, xitroo_domain,
+            ),
+            daemon=True,
+        )
         t.start()
 
     def _stop_account_creation(self):
@@ -3534,7 +3562,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_creator_stop_event"):
             self._creator_stop_event.set()
 
-    def _creator_thread_worker(self):
+    def _creator_thread_worker(
+        self,
+        provider_text, count, use_proxies, set_2fa, headless,
+        imap_server, imap_port, imap_email, imap_password, imap_domain,
+        gmail_email, gmail_domain,
+        guerrilla_domain, xitroo_domain,
+    ):
         try:
             from jagex_account_creator import models, utils
             from jagex_account_creator.account_creator_selenium import AccountCreatorSelenium
@@ -3555,12 +3589,7 @@ class MainWindow(QMainWindow):
             "Gmail Web": models.MailProvider.GMAIL_WEB,
         }
 
-        provider_text = self.cb_creator_provider.currentText()
         mail_provider = provider_map.get(provider_text, models.MailProvider.GUERRILLA_MAIL)
-        count = self.spin_creator_count.value()
-        use_proxies = self.cb_creator_proxies.isChecked()
-        set_2fa = self.cb_creator_2fa.isChecked()
-        headless = self.cb_creator_headless.isChecked()
 
         proxies = []
         if use_proxies:
@@ -3579,21 +3608,21 @@ class MainWindow(QMainWindow):
 
         if mail_provider == models.MailProvider.IMAP:
             imap_details = models.IMAPDetails(
-                ip=self.creator_imap_server.text(),
-                port=int(self.creator_imap_port.text() or 993),
-                email=self.creator_imap_email.text(),
-                password=self.creator_imap_password.text(),
+                ip=imap_server,
+                port=int(imap_port or 993),
+                email=imap_email,
+                password=imap_password,
             )
-            domains = [self.creator_imap_domain.text()]
+            domains = [imap_domain]
         elif mail_provider == models.MailProvider.GMAIL_WEB:
             gmail_web_details = models.GmailWebDetails(
-                email=self.creator_gmail_email.text(),
+                email=gmail_email,
             )
-            domains = [self.creator_gmail_domain.text()]
+            domains = [gmail_domain]
         elif mail_provider == models.MailProvider.GUERRILLA_MAIL:
-            domains = [self.creator_guerrilla_domain.text()]
+            domains = [guerrilla_domain]
         elif mail_provider == models.MailProvider.XITROO:
-            domains = [self.creator_xitroo_domain.text()]
+            domains = [xitroo_domain]
 
         created = 0
         failed = 0
