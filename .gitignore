@@ -1,28 +1,51 @@
-# Sensitive data & runtime artifacts
-farm.db
+# =============================
+# NEVER COMMIT: Sensitive / Personal Data
+# =============================
+# Database files (contain account passwords, TOTP secrets, proxies)
 *.db
+farm.db
+farm_manager.db
+
+# Cached account bank data (may contain username/wealth info)
 BankCache/
+
+# Runtime logs (may leak credentials or paths)
 debug.log
 out.txt
-Powershell command.txt
+*.log
 
-# Python
+# Personal shell commands / notes
+Powershell command.txt
+*.txt
+!requirements.txt
+!README.md
+!BUILD_SCRIPT.md
+
+# =============================
+# NEVER COMMIT: Environments & Build Artifacts
+# =============================
+# Python virtual environment
 .venv/
+venv/
+env/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+
+# Python build artifacts
 dist/
 build/
-
-# Java
-*.class
-SessionExtractor/
+*.spec
 
 # IDE
 .vscode/
 .idea/
 *.iml
+*.suo
+*.user
 
 # OS
 .DS_Store
