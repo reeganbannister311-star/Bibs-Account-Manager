@@ -3630,8 +3630,9 @@ class MainWindow(QMainWindow):
 
         created = 0
         failed = 0
+        i = 0
 
-        for i in range(count):
+        while i < count:
             if self._creator_stop_event.is_set():
                 self._creator_log_append("[ACCOUNT CREATOR] Stopped by user.")
                 break
@@ -3720,13 +3721,16 @@ class MainWindow(QMainWindow):
                         self._creator_log_append(f"[{i+1}/{count}] Session grab failed: {sess_err}")
 
                     created += 1
+                    i += 1  # Only advance on success
                 else:
-                    self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address}")
+                    self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address} — retrying...")
                     failed += 1
+                    time.sleep(5)
 
             except Exception as e:
-                self._creator_log_append(f"[{i+1}/{count}] Failed: {e}")
+                self._creator_log_append(f"[{i+1}/{count}] Failed: {e} — retrying...")
                 failed += 1
+                time.sleep(5)
 
         self._creator_log_append(f"[ACCOUNT CREATOR] Done. Created: {created}, Failed: {failed}")
         def _done():
