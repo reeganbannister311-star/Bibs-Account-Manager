@@ -101,9 +101,10 @@ def download_file(url: str, dest: Path, progress_cb=None) -> bool:
         req = urllib.request.Request(url, headers={"User-Agent": "BibsLauncher/1.0"})
         with urllib.request.urlopen(req, timeout=300) as resp:
             total = int(resp.headers.get("Content-Length", 0))
-            chunk_size = 8192
+            chunk_size = 262144  # 256KB chunks
             data = b""
             downloaded = 0
+            last_pct = -1
             while True:
                 chunk = resp.read(chunk_size)
                 if not chunk:
@@ -111,7 +112,10 @@ def download_file(url: str, dest: Path, progress_cb=None) -> bool:
                 data += chunk
                 downloaded += len(chunk)
                 if total and progress_cb:
-                    progress_cb(int(downloaded / total * 100))
+                    pct = int(downloaded / total * 100)
+                    if pct != last_pct:
+                        last_pct = pct
+                        progress_cb(pct)
             dest.write_bytes(data)
         return True
     except Exception:
