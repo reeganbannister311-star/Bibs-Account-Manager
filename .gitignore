@@ -1,0 +1,29 @@
+# Sensitive data & runtime artifacts
+farm.db
+*.db
+BankCache/
+debug.log
+out.txt
+Powershell command.txt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Java
+*.class
+SessionExtractor/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
