@@ -22,6 +22,10 @@ Powershell command.txt
 !BUILD_SCRIPT.md
 !launcher/version.txt
 
+# Launcher token (GitHub PAT for private repo access)
+launcher/token.txt
+token.txt
+
 # =============================
 # NEVER COMMIT: Environments & Build Artifacts
 # =============================
