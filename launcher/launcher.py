@@ -33,6 +33,18 @@ APP_DIR = LAUNCHER_DIR / "App"
 EXE_PATH = APP_DIR / EXE_NAME
 DREAMBOT_SCRIPTS = Path(os.path.expandvars(r"%USERPROFILE%\DreamBot\Scripts"))
 
+
+def find_exe() -> Path | None:
+    """Find the manager EXE, handling subfolders from ZIP extraction."""
+    # Direct path first
+    if EXE_PATH.exists():
+        return EXE_PATH
+    # Search recursively inside App/
+    if APP_DIR.exists():
+        for p in APP_DIR.rglob(EXE_NAME):
+            return p
+    return None
+
 # ── Colors ───────────────────────────────────────────────────────
 BG = "#1e1e2e"
 FG = "#cdd6f4"
@@ -280,17 +292,22 @@ class LauncherGUI:
         self.root.destroy()
 
     def _launch(self):
-        if not EXE_PATH.exists():
+        exe = find_exe()
+        if not exe:
+            listing = ""
+            if APP_DIR.exists():
+                items = [p.name for p in APP_DIR.iterdir()]
+                listing = f"\n\nContents of {APP_DIR}:\n  " + "\n  ".join(items[:20])
             self._fatal(
-                f"Manager executable not found:\n{EXE_PATH}\n\n"
-                "Run the launcher from its installed folder (not from a ZIP/RAR).\n"
-                "It will auto-download the app on first run if a GitHub release exists."
+                f"Manager executable not found:\n{EXE_PATH}{listing}\n\n"
+                "The ZIP may have extracted into a subfolder.\n"
+                "Run the launcher from its installed folder (not from a ZIP/RAR)."
             )
             return
 
         self.set_status("Launching Farm Manager...", SUCCESS)
         self.set_detail("")
-        subprocess.Popen([str(EXE_PATH)], cwd=str(APP_DIR))
+        subprocess.Popen([str(exe)], cwd=str(exe.parent))
         self.root.destroy()
 
 
@@ -308,7 +325,8 @@ def console_main():
     release, err = fetch_latest_release()
     if not release:
         print(f"[LAUNCHER] {err or 'Could not reach GitHub'}")
-        if EXE_PATH.exists():
+        exe = find_exe()
+        if exe:
             print("[LAUNCHER] Launching existing install ...")
         else:
             print(f"[LAUNCHER] ERROR: No release found and no local install.")
@@ -342,14 +360,15 @@ def console_main():
         else:
             print("[LAUNCHER] Already up to date.")
 
-    if not EXE_PATH.exists():
+    exe = find_exe()
+    if not exe:
         print(f"[LAUNCHER] ERROR: Manager not found at {EXE_PATH}")
         print("[LAUNCHER] Run from the install folder (not from ZIP/RAR).")
         input("Press Enter to exit...")
         sys.exit(1)
 
-    print(f"[LAUNCHER] Starting {EXE_PATH.name} ...")
-    subprocess.Popen([str(EXE_PATH)], cwd=str(APP_DIR))
+    print(f"[LAUNCHER] Starting {exe.name} ...")
+    subprocess.Popen([str(exe)], cwd=str(exe.parent))
     sys.exit(0)
 
 
