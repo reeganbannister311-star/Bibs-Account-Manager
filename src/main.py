@@ -2939,7 +2939,10 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _launch_session_getter(self, aid, show_browser=False, proxy=None):
-        """Launch get_jagex_session.py subprocess. Returns (job_dict, error_msg_or_None)."""
+        """Launch get_jagex_session.py. Returns (job_dict, error_msg_or_None)."""
+        import queue, threading, io, contextlib, traceback, subprocess, re
+
+        # Check packages
         missing = []
         for pkg in [("requests","requests"),("pyotp","pyotp"),("pyautogui","pyautogui"),("undetected_chromedriver","undetected-chromedriver")]:
             mod, pip_name = pkg
@@ -2952,13 +2955,92 @@ class MainWindow(QMainWindow):
             print(f"[SESSION] {msg}")
             return None, msg
 
-        script_path = os.path.join(os.path.dirname(__file__), "get_jagex_session.py")
-        if not os.path.isfile(script_path):
-            return None, f"Script not found: {script_path}"
+        # Check Chrome is installed
+        chrome_found = False
+        for cmd in [
+            r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
+            r'reg query "HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Google Chrome" /v version',
+            r'reg query "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Google Chrome" /v version',
+        ]:
+            try:
+                out = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+                if re.search(r'version\s+REG_SZ\s+(\d+)', out):
+                    chrome_found = True
+                    break
+            except Exception:
+                pass
+        for chrome_path in [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]:
+            if os.path.isfile(chrome_path):
+                chrome_found = True
+                break
+        if not chrome_found:
+            return None, "Google Chrome is not installed.\n\nThe session grabber requires Chrome.\nDownload it from: https://www.google.com/chrome/"
 
         log_dir = os.path.expandvars(r"%USERPROFILE%\DreamBot\BotData\logs")
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, f"session_getter_{aid}_{datetime.now().strftime('%H%M%S')}.log")
+
+        out_q = queue.Queue()
+        err_q = queue.Queue()
+
+        class _QueueIO:
+            def __init__(self, q):
+                self.q = q
+                self._buf = ""
+            def write(self, s):
+                self._buf += s
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    if line:
+                        self.q.put(line)
+            def flush(self):
+                if self._buf:
+                    self.q.put(self._buf)
+                    self._buf = ""
+
+        # Frozen (PyInstaller) mode: run in-process via thread
+        if getattr(sys, 'frozen', False):
+            try:
+                import get_jagex_session
+            except Exception as e:
+                return None, f"Failed to import session module: {e}"
+
+            def _run_session():
+                try:
+                    with contextlib.redirect_stdout(_QueueIO(out_q)), contextlib.redirect_stderr(_QueueIO(err_q)):
+                        get_jagex_session.main(aid, show_browser=show_browser, proxy=proxy)
+                    job["retcode"] = 0
+                except Exception as e:
+                    err_q.put(f"EXCEPTION: {e}")
+                    err_q.put(traceback.format_exc())
+                    job["retcode"] = 1
+                finally:
+                    job["done"] = True
+
+            job = {
+                "aid": aid,
+                "thread": threading.Thread(target=_run_session, daemon=True),
+                "out_q": out_q,
+                "err_q": err_q,
+                "start_t": time.time(),
+                "log_file": log_file,
+                "out_lines": [],
+                "err_lines": [],
+                "status": "running",
+                "retcode": None,
+                "done": False,
+            }
+            job["thread"].start()
+            return job, None
+
+        # Non-frozen: use subprocess
+        script_path = os.path.join(os.path.dirname(__file__), "get_jagex_session.py")
+        if not os.path.isfile(script_path):
+            return None, f"Script not found: {script_path}"
 
         cmd = [sys.executable, script_path, "--account-id", str(aid)]
         if show_browser:
@@ -2972,10 +3054,6 @@ class MainWindow(QMainWindow):
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
 
-        import threading
-        import queue
-        out_q = queue.Queue()
-        err_q = queue.Queue()
         def _reader(pipe, q):
             try:
                 for line in iter(pipe.readline, ''):
@@ -2990,10 +3068,10 @@ class MainWindow(QMainWindow):
         job = {
             "aid": aid,
             "proc": proc,
-            "out_q": out_q,
-            "err_q": err_q,
             "t_out": t_out,
             "t_err": t_err,
+            "out_q": out_q,
+            "err_q": err_q,
             "start_t": time.time(),
             "log_file": log_file,
             "out_lines": [],
@@ -3005,7 +3083,6 @@ class MainWindow(QMainWindow):
     def _poll_session_job(self, job, quiet=False):
         """Poll a running session getter to completion. Returns True on success."""
         import queue
-        proc = job["proc"]
         out_q = job["out_q"]
         err_q = job["err_q"]
         start_t = job["start_t"]
@@ -3014,7 +3091,20 @@ class MainWindow(QMainWindow):
         out_lines = job["out_lines"]
         err_lines = job["err_lines"]
 
-        while proc.poll() is None:
+        def _is_running():
+            if "thread" in job:
+                return job["thread"].is_alive()
+            return job["proc"].poll() is None
+
+        def _drain():
+            for q, lines in [(out_q, out_lines), (err_q, err_lines)]:
+                while True:
+                    try:
+                        lines.append(q.get_nowait())
+                    except queue.Empty:
+                        break
+
+        while _is_running():
             QApplication.processEvents()
             while True:
                 try:
@@ -3031,15 +3121,11 @@ class MainWindow(QMainWindow):
                 except queue.Empty:
                     break
             if time.time() - start_t > 120:
-                proc.kill()
-                job["t_out"].join(timeout=2)
-                job["t_err"].join(timeout=2)
-                for q, lines in [(out_q, out_lines), (err_q, err_lines)]:
-                    while True:
-                        try:
-                            lines.append(q.get_nowait())
-                        except queue.Empty:
-                            break
+                if "proc" in job:
+                    job["proc"].kill()
+                    job["t_out"].join(timeout=2)
+                    job["t_err"].join(timeout=2)
+                _drain()
                 stdout = "\n".join(out_lines)
                 stderr = "\n".join(err_lines)
                 with open(log_file, "w") as f:
@@ -3050,21 +3136,18 @@ class MainWindow(QMainWindow):
                 return False
             time.sleep(0.05)
 
-        job["t_out"].join(timeout=2)
-        job["t_err"].join(timeout=2)
-        for q, lines in [(out_q, out_lines), (err_q, err_lines)]:
-            while True:
-                try:
-                    lines.append(q.get_nowait())
-                except queue.Empty:
-                    break
+        if "proc" in job:
+            job["t_out"].join(timeout=2)
+            job["t_err"].join(timeout=2)
+        _drain()
         stdout = "\n".join(out_lines)
         stderr = "\n".join(err_lines)
+        retcode = job["proc"].returncode if "proc" in job else job.get("retcode", 1)
         with open(log_file, "w") as f:
-            f.write(f"EXIT CODE: {proc.returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}")
+            f.write(f"EXIT CODE: {retcode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}")
 
         got_success = "=== SUCCESS ===" in stdout
-        if proc.returncode == 0 or got_success:
+        if retcode == 0 or got_success:
             self._refresh_all()
             if not quiet:
                 acc = self.db.get_account(aid)
@@ -3075,7 +3158,7 @@ class MainWindow(QMainWindow):
         else:
             if not quiet:
                 output = stdout + "\n" + stderr
-                self._show_copyable_error("Session Failed", f"Exit code: {proc.returncode}\n\nLog: {log_file}\n\n{output[-1000:]}")
+                self._show_copyable_error("Session Failed", f"Exit code: {retcode}\n\nLog: {log_file}\n\n{output[-1000:]}")
             job["status"] = "done_fail"
             return False
 
