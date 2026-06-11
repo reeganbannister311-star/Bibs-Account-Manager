@@ -1031,6 +1031,108 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(ai_tab, "AI Agent")
 
+        # Tab: Account Creator
+        creator_tab = QWidget()
+        crl = QVBoxLayout(creator_tab)
+        crl.setContentsMargins(0,0,0,0)
+        crl.setSpacing(8)
+
+        # Toolbar
+        ctb = QHBoxLayout()
+        ctb.addWidget(QLabel("Accounts:"))
+        self.spin_creator_count = QSpinBox()
+        self.spin_creator_count.setRange(1, 100)
+        self.spin_creator_count.setValue(5)
+        self.spin_creator_count.setSuffix(" to create")
+        self.spin_creator_count.setFixedWidth(120)
+        ctb.addWidget(self.spin_creator_count)
+
+        ctb.addWidget(QLabel("Provider:"))
+        self.cb_creator_provider = QComboBox()
+        self.cb_creator_provider.addItems(["Guerrilla Mail", "Xitroo", "IMAP", "Gmail Web"])
+        self.cb_creator_provider.currentTextChanged.connect(self._on_creator_provider_changed)
+        ctb.addWidget(self.cb_creator_provider)
+
+        self.cb_creator_proxies = QCheckBox("Use Proxies")
+        self.cb_creator_proxies.setChecked(True)
+        ctb.addWidget(self.cb_creator_proxies)
+
+        self.cb_creator_2fa = QCheckBox("Enable 2FA")
+        self.cb_creator_2fa.setChecked(True)
+        ctb.addWidget(self.cb_creator_2fa)
+
+        self.cb_creator_headless = QCheckBox("Headless")
+        ctb.addWidget(self.cb_creator_headless)
+
+        self.btn_creator_start = QPushButton("Start")
+        self.btn_creator_start.setStyleSheet("background:#388e3c")
+        self.btn_creator_start.clicked.connect(self._start_account_creation)
+        ctb.addWidget(self.btn_creator_start)
+
+        self.btn_creator_stop = QPushButton("Stop")
+        self.btn_creator_stop.setStyleSheet("background:#d32f2f")
+        self.btn_creator_stop.clicked.connect(self._stop_account_creation)
+        self.btn_creator_stop.setEnabled(False)
+        ctb.addWidget(self.btn_creator_stop)
+        ctb.addStretch()
+        crl.addLayout(ctb)
+
+        # Provider settings
+        self.creator_settings = QGroupBox("Provider Settings")
+        csl = QVBoxLayout(self.creator_settings)
+        csl.setContentsMargins(8,12,8,8)
+        csl.setSpacing(6)
+
+        # Guerrilla Mail settings
+        self.creator_guerrilla_widget = QWidget()
+        guerrilla_l = QFormLayout(self.creator_guerrilla_widget)
+        self.creator_guerrilla_domain = QLineEdit("gmail.com")
+        guerrilla_l.addRow("Domain:", self.creator_guerrilla_domain)
+        csl.addWidget(self.creator_guerrilla_widget)
+
+        # Xitroo settings
+        self.creator_xitroo_widget = QWidget()
+        xitroo_l = QFormLayout(self.creator_xitroo_widget)
+        self.creator_xitroo_domain = QLineEdit("gmail.com")
+        xitroo_l.addRow("Domain:", self.creator_xitroo_domain)
+        csl.addWidget(self.creator_xitroo_widget)
+
+        # IMAP settings
+        self.creator_imap_widget = QWidget()
+        imap_l = QFormLayout(self.creator_imap_widget)
+        self.creator_imap_server = QLineEdit("imap.gmail.com")
+        self.creator_imap_port = QLineEdit("993")
+        self.creator_imap_email = QLineEdit()
+        self.creator_imap_password = QLineEdit()
+        self.creator_imap_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.creator_imap_domain = QLineEdit("gmail.com")
+        imap_l.addRow("IMAP Server:", self.creator_imap_server)
+        imap_l.addRow("IMAP Port:", self.creator_imap_port)
+        imap_l.addRow("Email:", self.creator_imap_email)
+        imap_l.addRow("Password:", self.creator_imap_password)
+        imap_l.addRow("Domain:", self.creator_imap_domain)
+        csl.addWidget(self.creator_imap_widget)
+
+        # Gmail Web settings
+        self.creator_gmail_widget = QWidget()
+        gmail_l = QFormLayout(self.creator_gmail_widget)
+        self.creator_gmail_email = QLineEdit()
+        self.creator_gmail_domain = QLineEdit("gmail.com")
+        gmail_l.addRow("Gmail Address:", self.creator_gmail_email)
+        gmail_l.addRow("Domain:", self.creator_gmail_domain)
+        csl.addWidget(self.creator_gmail_widget)
+
+        crl.addWidget(self.creator_settings)
+
+        # Log area
+        self.creator_log = QTextEdit()
+        self.creator_log.setReadOnly(True)
+        self.creator_log.setPlaceholderText("Account creation progress will appear here...")
+        crl.addWidget(self.creator_log)
+
+        tabs.addTab(creator_tab, "Account Creator")
+        self._on_creator_provider_changed("Guerrilla Mail")
+
         tabs.currentChanged.connect(self._refresh_all)
         ml.addWidget(tabs, stretch=1)
 
@@ -3399,6 +3501,173 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Batch Done", f"Success: {success}\nFailed: {failed}")
         else:
             self._show_auto_info("Batch Done", f"All {success} session(s) grabbed successfully.", 2000)
+
+    # ------------------------------------------------------------------
+    # Account Creator
+    # ------------------------------------------------------------------
+    def _on_creator_provider_changed(self, text):
+        self.creator_guerrilla_widget.setVisible(text == "Guerrilla Mail")
+        self.creator_xitroo_widget.setVisible(text == "Xitroo")
+        self.creator_imap_widget.setVisible(text == "IMAP")
+        self.creator_gmail_widget.setVisible(text == "Gmail Web")
+
+    def _creator_log_append(self, message):
+        def _append():
+            self.creator_log.append(message)
+            sb = self.creator_log.verticalScrollBar()
+            if sb:
+                sb.setValue(sb.maximum())
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, _append)
+
+    def _start_account_creation(self):
+        self.btn_creator_start.setEnabled(False)
+        self.btn_creator_stop.setEnabled(True)
+        self.creator_log.clear()
+        self._creator_log_append("[ACCOUNT CREATOR] Starting...")
+        self._creator_stop_event = threading.Event()
+        t = threading.Thread(target=self._creator_thread_worker, daemon=True)
+        t.start()
+
+    def _stop_account_creation(self):
+        self._creator_log_append("[ACCOUNT CREATOR] Stop requested...")
+        if hasattr(self, "_creator_stop_event"):
+            self._creator_stop_event.set()
+
+    def _creator_thread_worker(self):
+        try:
+            from jagex_account_creator import models, utils
+            from jagex_account_creator.account_creator_selenium import AccountCreatorSelenium
+        except Exception as e:
+            self._creator_log_append(f"[ERROR] Failed to import account creator: {e}")
+            self._creator_log_append("[ERROR] Make sure all dependencies are installed (selenium, undetected-chromedriver, pyotp, imap-tools, wreq, loguru, pydantic, platformdirs).")
+            def _done():
+                self.btn_creator_start.setEnabled(True)
+                self.btn_creator_stop.setEnabled(False)
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, _done)
+            return
+
+        provider_map = {
+            "Guerrilla Mail": models.MailProvider.GUERRILLA_MAIL,
+            "Xitroo": models.MailProvider.XITROO,
+            "IMAP": models.MailProvider.IMAP,
+            "Gmail Web": models.MailProvider.GMAIL_WEB,
+        }
+
+        provider_text = self.cb_creator_provider.currentText()
+        mail_provider = provider_map.get(provider_text, models.MailProvider.GUERRILLA_MAIL)
+        count = self.spin_creator_count.value()
+        use_proxies = self.cb_creator_proxies.isChecked()
+        set_2fa = self.cb_creator_2fa.isChecked()
+        headless = self.cb_creator_headless.isChecked()
+
+        proxies = []
+        if use_proxies:
+            db_proxies = self.db.list_proxies(active_only=True)
+            for p in db_proxies:
+                proxies.append(models.Proxy(
+                    ip=p["host"],
+                    port=p["port"],
+                    username=p.get("username") or None,
+                    password=p.get("password") or None,
+                ))
+
+        imap_details = None
+        gmail_web_details = None
+        domains = ["gmail.com"]
+
+        if mail_provider == models.MailProvider.IMAP:
+            imap_details = models.IMAPDetails(
+                ip=self.creator_imap_server.text(),
+                port=int(self.creator_imap_port.text() or 993),
+                email=self.creator_imap_email.text(),
+                password=self.creator_imap_password.text(),
+            )
+            domains = [self.creator_imap_domain.text()]
+        elif mail_provider == models.MailProvider.GMAIL_WEB:
+            gmail_web_details = models.GmailWebDetails(
+                email=self.creator_gmail_email.text(),
+            )
+            domains = [self.creator_gmail_domain.text()]
+        elif mail_provider == models.MailProvider.GUERRILLA_MAIL:
+            domains = [self.creator_guerrilla_domain.text()]
+        elif mail_provider == models.MailProvider.XITROO:
+            domains = [self.creator_xitroo_domain.text()]
+
+        created = 0
+        failed = 0
+
+        for i in range(count):
+            if self._creator_stop_event.is_set():
+                self._creator_log_append("[ACCOUNT CREATOR] Stopped by user.")
+                break
+
+            proxy = None
+            if proxies:
+                proxy = proxies[i % len(proxies)]
+
+            self._creator_log_append(f"[{i+1}/{count}] Creating account...")
+            try:
+                ac = AccountCreatorSelenium(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                    element_wait_timeout=30,
+                    cache_update_threshold=0.3,
+                    enable_dev_tools=False,
+                    account_email_domain=utils.get_account_domain(domains=domains),
+                    account_password="",
+                    mail_provider=mail_provider,
+                    run_id=f"fm-{i+1}",
+                    proxy=proxy,
+                    set_2fa=set_2fa,
+                    use_headless_browser=headless,
+                    imap_details=imap_details,
+                    gmail_web_details=gmail_web_details,
+                    use_proxy_for_temp_mail=bool(proxy),
+                )
+                result = ac.register_account()
+                account = result.jagex_account
+
+                # Save to Farm Manager DB
+                proxy_id = None
+                if proxy:
+                    db_proxies = self.db.list_proxies(active_only=True)
+                    for p in db_proxies:
+                        if p["host"] == proxy.ip and p["port"] == proxy.port:
+                            proxy_id = p["id"]
+                            break
+
+                aid = self.db.add_account(
+                    email=account.email.address,
+                    password=account.password,
+                    pin="",
+                    totp=account.tfa.setup_key if account.tfa else "",
+                    username=account.username,
+                    display_name="",
+                    jagex_account=1,
+                    proxy_id=proxy_id,
+                    category="Ready To Farm",
+                    status="Offline",
+                    notes=f"Created by Account Creator | Birthday: {account.birthday.day}/{account.birthday.month}/{account.birthday.year}",
+                )
+                if aid:
+                    self._creator_log_append(f"[{i+1}/{count}] Created: {account.email.address} (ID {aid})")
+                    created += 1
+                else:
+                    self._creator_log_append(f"[{i+1}/{count}] DB duplicate? {account.email.address}")
+                    failed += 1
+
+            except Exception as e:
+                self._creator_log_append(f"[{i+1}/{count}] Failed: {e}")
+                failed += 1
+
+        self._creator_log_append(f"[ACCOUNT CREATOR] Done. Created: {created}, Failed: {failed}")
+        def _done():
+            self._refresh_all()
+            self.btn_creator_start.setEnabled(True)
+            self.btn_creator_stop.setEnabled(False)
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, _done)
 
     def _create_heatmap_html(self):
         """Generate the heatmap HTML file with explv map iframe + bot sidebar."""

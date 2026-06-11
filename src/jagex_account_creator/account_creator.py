@@ -1,0 +1,637 @@
+import base64
+import random
+import re
+import shutil
+import threading
+import time
+from datetime import timedelta
+from pathlib import Path
+
+import platformdirs
+import pyotp
+import wreq
+from DrissionPage import Chromium, ChromiumOptions
+from DrissionPage.common import Settings
+from DrissionPage.items import ChromiumElement, MixTab
+from imap_tools import AND, MailBox
+from loguru import logger
+from wreq.blocking import Client
+
+from . import models, utils
+from .gproxy import GProxy
+
+
+class ElementNotFoundError(Exception):
+    """Raised when a required element cannot be found."""
+
+    pass
+
+
+class RegistrationError(Exception):
+    """An error that occurred during account registration."""
+
+    pass
+
+
+class AccountCreator:
+    _BROWSER_CACHE_FOLDER_LOCK = threading.Lock()
+
+    _URLS_TO_BLOCK = [
+        ".ico",
+        # ".jpg",
+        # ".png",
+        ".gif",
+        ".svg",
+        ".webp",
+        "data:image",
+        ".woff",
+        ".woff2",
+        ".woff2!static",
+        ".ttf",
+        ".otf",
+        ".eot",
+        "analytics",
+        "tracking",
+        "google-analytics",
+        ".googleapis.",
+        "chargebee",
+        "cookiebot",
+        "beacon",
+    ]
+
+    _REGISTRATION_URL = "https://account.jagex.com/en-GB/login/registration-start"
+    _MANAGEMENT_URL = "https://account.jagex.com/en-GB/manage/profile"
+
+    _SCRIPT_CACHE_PATH = platformdirs.user_cache_path(
+        appname="jagex_account_creator", ensure_exists=True
+    )
+
+    def __init__(
+        self,
+        wreq_client: Client,
+        user_agent: str,
+        element_wait_timeout: int,
+        cache_update_threshold: float,
+        enable_dev_tools: bool,
+        account_email_domain: str,
+        account_password: str,
+        mail_provider: models.MailProvider,
+        run_id: str | None = None,
+        proxy: models.Proxy | None = None,
+        set_2fa: bool = False,
+        use_headless_browser: bool = False,
+        imap_details: models.IMAPDetails | None = None,
+        use_proxy_for_temp_mail: bool = True,
+    ) -> None:
+        self.run_id = run_id or utils.generate_string(include_punctuation=False)
+        self.logger = logger.bind(module="AccountCreator", uid=self.run_id)
+
+        self.user_agent = user_agent
+        self.enable_dev_tools = enable_dev_tools
+        self.use_headless_browser = use_headless_browser
+        self.element_wait_timeout = element_wait_timeout
+
+        self.browser_cache_folder = self._SCRIPT_CACHE_PATH / "primary_browser_cache"
+        if not self.browser_cache_folder.is_dir():
+            self.browser_cache_folder.mkdir()
+        self.cache_update_threshold = cache_update_threshold
+
+        self.proxy = proxy
+        self.account_email_domain = account_email_domain
+        self.account_password = account_password
+        self.set_2fa = set_2fa
+
+        self.mail_provider = mail_provider
+        if self.mail_provider == models.MailProvider.IMAP:
+            self.imap_details = imap_details
+        else:
+            self.use_proxy_for_temp_mail = use_proxy_for_temp_mail
+            self.wreq_client = wreq_client or utils.setup_wreq_client(
+                user_agent=self.user_agent,
+                timeout_seconds=self.element_wait_timeout,
+            )
+            if self.proxy:
+                self.wreq_proxy = self.proxy.to_wreq()
+            else:
+                self.wreq_proxy = None
+
+        Settings.set_language("en")
+
+    def _get_dir_size(self, directory: Path) -> int:
+        """Return the size of a directory"""
+        return sum(f.stat().st_size for f in directory.glob("**/*") if f.is_file())
+
+    def _setup_browser_cache(self, co: ChromiumOptions, run_path: Path) -> None:
+        """Copies the primary cache and sets copy for current run."""
+        run_number = str(run_path).split("_")[-1]
+        self.logger.info(f"Creating cache folder for run number: {run_number}")
+        new_cache_folder = run_path / "cache"
+        if self.browser_cache_folder.is_dir():
+            with self._BROWSER_CACHE_FOLDER_LOCK:
+                shutil.copytree(self.browser_cache_folder, new_cache_folder)
+        co.set_argument(f"--disk-cache-dir={new_cache_folder}")
+
+    def _get_new_browser(self, run_path: Path, ip: str, port: int) -> Chromium:
+        """Creates a new browser tab with temp settings and an open port."""
+        co = ChromiumOptions()
+        co.auto_port()
+
+        co.mute()
+        # co.no_imgs()  # no_imgs() seems to cause cloudflare challenge to infinite loop
+
+        # Disable chrome optimization features to save on bandwidth
+        co.set_argument(
+            "--disable-features",
+            "PrivacySandboxSettings4,OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction,OptimizationHints",
+        )
+        co.set_argument("--disable-background-networking")
+        co.set_argument("--disable-component-update")
+        co.set_argument("--disable-background-downloads")
+        co.set_argument("--disable-crash-reporter")
+        co.set_argument("--accept-lang=en-US")
+
+        # Disable the pop-up that asks if we want to save
+        # the created account to the Google password manager.
+        # I don't think it blocks elements, but just in case.
+        co.set_pref("credentials_enable_service", False)
+        co.set_pref("profile.password_manager_enabled", False)
+
+        self._setup_browser_cache(co, run_path=run_path)
+
+        self.logger.debug(f"Setting browser timeouts to: {self.element_wait_timeout}")
+        co.set_timeouts(self.element_wait_timeout)
+
+        if self.user_agent:
+            self.logger.debug(f"Setting browser user-agent: {self.user_agent}")
+            co.set_user_agent(self.user_agent)
+
+        if not self.use_headless_browser:
+            if self.enable_dev_tools:
+                self.logger.debug("Setting chrome to automatically open dev tools.")
+                co.set_argument("--auto-open-devtools-for-tabs")
+        else:
+            self.logger.debug("Setting --headless on chrome browser.")
+            co.set_argument("--headless")
+            if not self.user_agent:
+                self.logger.warning(
+                    "Using headless without setting a user agent. This will likely get your session detected."
+                )
+
+        browser_proxy_string = f"http://{ip}:{port}"
+        self.logger.debug(f"Setting browser proxy: {browser_proxy_string}")
+        co.set_proxy(browser_proxy_string)
+
+        self.logger.debug("Creating browser object.")
+        browser = Chromium(addr_or_opts=co)
+        self.logger.debug("Returning browser object.")
+        return browser
+
+    def _find_element(self, tab: MixTab, identifier: setattr) -> ChromiumElement:
+        """Find a visible element in the tab. Raises ElementNotFoundError."""
+        self.logger.debug(f"Waiting for element to be displayed: {identifier}")
+
+        if not tab.wait.ele_displayed(identifier):
+            raise ElementNotFoundError(f"Element not found or not displayed: {identifier}")
+
+        element = tab.ele(identifier)
+        if not element:
+            raise ElementNotFoundError(
+                f"Failed to get element after display confirmed: {identifier}"
+            )
+
+        self.logger.debug(f"Scrolling to element: {identifier}")
+        tab.scroll.to_see(element)
+        self.logger.debug(f"Element: {identifier} should now be visible.")
+
+        self.logger.debug(f"Returning element with identifier: {identifier}")
+        return element
+
+    def _click_element(self, tab: MixTab, identifier: str) -> ChromiumElement:
+        """Left click the provided element."""
+        element = self._find_element(tab, identifier)
+        self.logger.debug("Clicking element")
+        tab.actions.move_to(element).click()
+        return element
+
+    def _click_and_type(
+        self, tab: MixTab, identifier: str, text: str, typing_interval: float = 0.01
+    ) -> ChromiumElement:
+        """Click the provided element and then type the text."""
+        element = self._find_element(tab, identifier)
+        self.logger.debug(f"Clicking element and then typing: {text}")
+        tab.actions.move_to(element).click().type(text, interval=typing_interval)
+        return element
+
+    def _get_browser_ip(self, tab: MixTab) -> str:
+        """Get the IP address that the browser is using."""
+        url = "https://api64.ipify.org/?format=raw"
+        self.logger.debug(f"Going to url: {url}")
+        if not tab.get(url):
+            raise RegistrationError("Failed to get to ipify to verify our browser ip.")
+        ele = self._find_element(tab, identifier="tag:pre")
+        return ele.text
+
+    def _locate_cf_button(self, tab: MixTab) -> ChromiumElement | None:
+        """Finds the CF challenge button in the tab."""
+        self.logger.debug("Looking for CF checkbox.")
+
+        for ele in tab.eles("tag:input", timeout=1):
+            attrs = ele.attrs
+            if not (attrs.get("type") == "hidden" and "turnstile" in attrs.get("name", "")):
+                continue
+
+            self.logger.debug(f"Found turnstile input: {attrs['name']}")
+
+            try:
+                container = ele.parent()
+                if not container:
+                    self.logger.debug("Couldn't get container")
+                    continue
+
+                shadow = container.shadow_root or container.child().shadow_root
+                if not shadow:
+                    self.logger.debug("Couldn't access shadow root")
+                    continue
+
+                iframe = shadow.ele("tag:iframe")
+                if not iframe:
+                    self.logger.debug("No iframe in shadow root")
+                    continue
+
+                frame = tab.get_frame(iframe)
+                if not frame:
+                    self.logger.debug("Couldn't get frame context")
+                    continue
+
+                body = frame.ele("tag:body")
+                if body and body.shadow_root:
+                    if checkbox := body.shadow_root.ele("tag:input"):
+                        return checkbox
+            except Exception as e:
+                self.logger.debug(f"Exception locating CF checkbox: {e}")
+                continue
+
+        return None
+
+    def _bypass_challenge(self, tab: MixTab, timeout_seconds: int = 15) -> None:
+        """Attempts to bypass the CF challenge by clicking the checkbox."""
+        challenge_page_title = "Just a moment"
+        timeout = time.monotonic() + timeout_seconds
+
+        # Wait to get to the challenge page before we attempt to solve it.
+        self.logger.debug(f"Waiting for page title: {challenge_page_title}")
+        while challenge_page_title not in tab.title:
+            time.sleep(0.1)
+
+        while time.monotonic() < timeout:
+            if challenge_page_title not in tab.title:
+                self.logger.debug("No longer on the challenge page.")
+                return
+
+            button = self._locate_cf_button(tab)
+            if button:
+                button.click()
+                self.logger.debug("Clicked CF checkbox.")
+
+            time.sleep(0.5)
+
+        raise TimeoutError("Timed out trying to bypass CF challenge.")
+
+    def _get_verification_code_imap(
+        self, imap_details: models.IMAPDetails, email_username: str, timeout_seconds: int = 30
+    ) -> str:
+        """Gets the verification code from catch all email via imap."""
+        self.logger.debug("Getting account verification code via imap.")
+        email_query = AND(to=email_username, seen=False)
+        code_regex = r'data-testid="registration-started-verification-code"[^>]*>([A-Z0-9]+)<'
+        with MailBox(imap_details.ip, imap_details.port).login(
+            imap_details.email, imap_details.password
+        ) as mailbox:
+            timeout = time.monotonic() + timeout_seconds
+            while time.monotonic() < timeout:
+                emails = mailbox.fetch(email_query)
+                for email in emails:
+                    match = re.search(code_regex, email.html)
+                    if match:
+                        code = match.group(1)
+                        self.logger.debug(f"Returning verification code: {code}")
+                        return code
+                time.sleep(0.1)
+        raise RegistrationError("Timed out waiting for registration code.")
+
+    def _get_verification_code_guerrilla_mail(
+        self, email_username: str, timeout_seconds: int = 30
+    ) -> str:
+        """Get the verification code for the jagex account from a temp Guerrilla Mail email."""
+        guerrilla_mail_api_url = "https://api.guerrillamail.com/ajax.php"
+        self.logger.debug("Getting account verification code via Guerrilla mail.")
+
+        get_email_resp = self.wreq_client.get(
+            url=guerrilla_mail_api_url,
+            query={"f": "get_email_address", "lang": "en"},
+            proxy=self.wreq_proxy,
+        )
+        self.logger.debug(f"Response: {get_email_resp}")
+        get_email_resp.raise_for_status()
+
+        sid_token = get_email_resp.json()["sid_token"]
+
+        # Guerrilla Mail API has an issue with the case of our username
+        # when getting email via the API, even though it seems fine on the site..
+        email_username = email_username.lower()
+
+        self.logger.debug(f"Sending request to set Guerrilla Mail email to: {email_username}.")
+        set_email_resp = self.wreq_client.get(
+            url=guerrilla_mail_api_url,
+            query={
+                "f": "set_email_user",
+                "email_user": email_username,
+                "lang": "en",
+                "sid_token": sid_token,
+            },
+            proxy=self.wreq_proxy,
+        )
+        self.logger.debug(f"Response: {set_email_resp}")
+        set_email_resp.raise_for_status()
+
+        if email_username not in set_email_resp.json()["email_addr"]:
+            raise RegistrationError("Failed to set account email on Guerrilla Mail.")
+
+        timeout = time.monotonic() + timeout_seconds
+        while time.monotonic() < timeout:
+            self.logger.debug("Sending request to check our email.")
+            check_email_resp = self.wreq_client.get(
+                url=guerrilla_mail_api_url,
+                query={"f": "check_email", "sid_token": sid_token, "seq": 0},
+                proxy=self.wreq_proxy,
+            )
+            self.logger.debug(f"Response: {check_email_resp}")
+            check_email_resp.raise_for_status()
+
+            for email in check_email_resp.json()["list"]:
+                if email["mail_from"] != "no-reply@contact.jagex.com":
+                    continue
+                mail_subject: str = email["mail_subject"]
+                code = mail_subject.split()[0]
+                self.logger.debug(f"Returning verification code: {code}")
+                return code
+            time.sleep(1)
+        raise RegistrationError("Timed out waiting for registration code.")
+
+    def _get_verification_code_xitroo(self, account_email: str, timeout_seconds: int = 60) -> str:
+        """Get account verification code via xitroo temp mail api."""
+        self.logger.debug("Getting verification code via xitroo.")
+        timeout = time.monotonic() + timeout_seconds
+        while time.monotonic() < timeout:
+            self.logger.debug("Sending request to check our email.")
+            check_email_resp = self.wreq_client.get(
+                url="https://api.xitroo.com/v1/mails",
+                query={
+                    "locale": "en",
+                    "mailAddress": account_email,
+                    "mailsPerPage": "1",
+                    # Increase range from current time
+                    # to make sure we get the email if it's delivered.
+                    "minTimestamp": str(time.time() - timeout_seconds),
+                    "maxTimestamp": str(time.time() + timeout_seconds),
+                },
+                proxy=self.wreq_proxy,
+            )
+            self.logger.debug(f"Response: {check_email_resp}")
+            check_email_resp.raise_for_status()
+
+            emails = check_email_resp.json().get("mails", [])
+            self.logger.debug(f"Emails: {len(emails)}")
+            for email in emails:
+                if email["from"] != "Jagex <no-reply@contact.jagex.com>":
+                    continue
+                mail_subject: str = base64.b64decode(email["subject"]).decode("utf-8")
+                code = mail_subject.split()[0]
+                self.logger.debug(f"Returning verification code: {code}")
+                return code
+            time.sleep(1)
+        raise RegistrationError("Timed out waiting for registration code.")
+
+    def _submit_account_username(self, tab: MixTab, timeout_seconds: int = 30) -> str:
+        """Wrapper function to loop the username submission.
+
+        This is required in case we get an error like "name not allowed", etc.
+        Returns the account username used.
+        """
+        timeout = time.monotonic() + timeout_seconds
+        while time.monotonic() < timeout:
+            try:
+                display_name_field = self._find_element(tab, "@id:displayName")
+            except ElementNotFoundError:
+                self.logger.warning("Couldn't find display name field.")
+                continue
+            else:
+                self.logger.debug("Clearing username field.")
+                display_name_field.clear()
+
+            account_username = utils.generate_string(include_punctuation=False, length=12)
+            self.logger.debug(f"Attempting to submit account username: {account_username}")
+
+            tab.actions.move_to(display_name_field).click().type(account_username, interval=0.01)
+
+            self._click_element(tab, "@id:registration-account-name-form--continue-button")
+            tab.wait.url_change(text="account-name", exclude=True, timeout=5)
+
+            if "account-name" not in tab.url:
+                self.logger.info(f"Returning accepted username: {account_username}")
+                return account_username
+            self.logger.debug("Retrying username submission.")
+
+        raise RegistrationError("Timed out submitting account username.")
+
+    def _update_cache(self, run_cache_path: Path) -> None:
+        """Update primary cache if run cache is significantly different."""
+        with self._BROWSER_CACHE_FOLDER_LOCK:
+            if not self.browser_cache_folder.is_dir():
+                self.logger.debug("Primary cache doesn't exist. Copying run cache.")
+                shutil.copytree(run_cache_path, self.browser_cache_folder)
+                return
+
+            run_size = self._get_dir_size(run_cache_path)
+            original_size = self._get_dir_size(self.browser_cache_folder)
+
+            if original_size == 0:
+                size_diff_percent = 100.0 if run_size else 0.0
+            else:
+                size_diff_percent = (run_size - original_size) / original_size * 100
+
+            self.logger.debug(
+                f"Cache sizes - run: {run_size}, original: {original_size}, diff: {size_diff_percent:.1f}%"
+            )
+
+            if size_diff_percent >= self.cache_update_threshold:
+                self.logger.debug("Updating primary cache.")
+                shutil.rmtree(self.browser_cache_folder)
+                shutil.copytree(run_cache_path, self.browser_cache_folder)
+
+    def _cleanup(
+        self,
+        run_path: Path,
+        browser: Chromium,
+        gproxy: GProxy,
+        update_primary_cache: bool = False,
+    ) -> None:
+        """Cleanup browser, proxy, and temp files."""
+        browser.quit()
+        gproxy.stop()
+
+        if update_primary_cache:
+            self._update_cache(run_path / "cache")
+
+        shutil.rmtree(run_path, ignore_errors=True)
+
+    def _handle_registration(self, browser: Chromium) -> models.JagexAccount:
+        """Do the account registration flow and return a JagexAccount or raise a RegistrationError."""
+        tab = browser.latest_tab
+        tab.set.auto_handle_alert()
+
+        tab.run_cdp("Network.enable")
+        tab.run_cdp("Network.setBlockedURLs", urls=self._URLS_TO_BLOCK)
+
+        browser_ip = self._get_browser_ip(tab)
+        self.logger.info(f"Browser IP: {browser_ip}")
+
+        account_birthday = models.Birthday(
+            day=random.randint(1, 25),
+            month=random.randint(1, 12),
+            year=random.randint(1979, 2010),
+        )
+
+        account_email = models.Email(
+            username=utils.generate_string(include_punctuation=False, length=12),
+            domain=self.account_email_domain,
+        )
+
+        self.logger.debug(f"Going to registration url: {self._REGISTRATION_URL}")
+        if not tab.get(self._REGISTRATION_URL):
+            raise RegistrationError(f"Failed to go to url: {self._REGISTRATION_URL}")
+        tab.wait.doc_loaded()
+
+        if any(msg in tab.html for msg in ["Sorry, you have been blocked", "Too many requests"]):
+            raise RegistrationError("IP is blocked by CF. Exiting.")
+
+        self._click_and_type(tab, "@id:email", account_email.address)
+        self._click_and_type(
+            tab,
+            "@id:registration-start-form--field-day",
+            str(account_birthday.day),
+        )
+        self._click_and_type(
+            tab,
+            "@id:registration-start-form--field-month",
+            str(account_birthday.month),
+        )
+        self._click_and_type(
+            tab,
+            "@id:registration-start-form--field-year",
+            str(account_birthday.year),
+        )
+        self._click_element(tab, "@id:registration-start-accept-agreements")
+        self._click_element(tab, "@id:registration-start-form--continue-button")
+        tab.wait.url_change(text="registration-start", exclude=True, raise_err=True)
+        tab.wait.doc_loaded(raise_err=True)
+
+        if self.mail_provider == models.MailProvider.IMAP:
+            code = self._get_verification_code_imap(
+                imap_details=self.imap_details, email_username=account_email.username
+            )
+        elif self.mail_provider == models.MailProvider.GUERRILLA_MAIL:
+            code = self._get_verification_code_guerrilla_mail(email_username=account_email.username)
+        elif self.mail_provider == models.MailProvider.XITROO:
+            code = self._get_verification_code_xitroo(account_email=account_email.address)
+        else:
+            raise RegistrationError(f"Unsupported mail provider: {self.mail_provider}")
+
+        self._click_and_type(tab, "@id:registration-verify-form-code-input", code)
+        self._click_element(tab, "@id:registration-verify-form-continue-button")
+        tab.wait.url_change(text="registration-verify", exclude=True, raise_err=True)
+        tab.wait.doc_loaded(raise_err=True)
+
+        account_username = self._submit_account_username(tab)
+
+        self._click_and_type(tab, "@id:password", self.account_password)
+        self._click_and_type(tab, "@id:repassword", self.account_password)
+        self._click_element(tab, "@id:registration-password-form--create-account-button")
+
+        tab.wait.title_change("Registration completed", raise_err=True)
+        tab.wait.doc_loaded(raise_err=True)
+
+        jagex_account = models.JagexAccount(
+            email=account_email,
+            username=account_username,
+            password=self.account_password,
+            birthday=account_birthday,
+            real_ip=browser_ip,
+            proxy=self.proxy,
+        )
+
+        if self.set_2fa:
+            self.logger.debug("Going to management page")
+            if not tab.get(self._MANAGEMENT_URL):
+                raise RegistrationError("Failed to get to the account management page.")
+            tab.wait.doc_loaded(raise_err=True)
+
+            self._bypass_challenge(tab)
+
+            tab.wait.url_change(self._MANAGEMENT_URL, raise_err=True)
+            tab.wait.doc_loaded(raise_err=True)
+
+            self._click_element(tab, "@data-testid:mfa-enable-totp-button")
+            self._click_element(tab, "@id:authentication-setup-show-secret")
+
+            setup_key_element = self._find_element(tab, "@id:authentication-setup-secret-key")
+            setup_key = setup_key_element.text
+            self.logger.debug(f"Extracted 2fa setup key: {setup_key}")
+
+            self._click_element(tab, "@data-testid:authenticator-setup-qr-button")
+            totp = pyotp.TOTP(setup_key).now()
+            self.logger.debug(f"Generated TOTP code: {totp}")
+
+            self._click_and_type(tab, "@id:authentication-setup-verification-code", totp)
+            self._click_element(tab, "@data-testid:authentication-setup-qr-code-submit-button")
+
+            backup_codes_element = self._find_element(
+                tab, "@id:authentication-setup-complete-codes"
+            )
+            backup_codes = backup_codes_element.text.split("\n")
+            self.logger.debug(f"Got 2fa backup codes: {backup_codes}")
+
+            jagex_account.tfa = models.TwoFactorAuth(setup_key=setup_key, backup_codes=backup_codes)
+
+        self.logger.info("Registration finished")
+        return jagex_account
+
+    def register_account(self) -> models.AccountRegistrationResult:
+        """Wrapper function to fully register a Jagex account."""
+        start_time = time.monotonic()
+        run_path = self._SCRIPT_CACHE_PATH / utils.generate_string(include_punctuation=False)
+        self.logger.debug(f"Using run path: {run_path}")
+        run_path.mkdir()
+
+        gproxy = GProxy(
+            run_uid=self.run_id,
+            upstream_proxy=self.proxy,
+            allowed_hosts=["jagex", "cloudflare", "ipify"],
+        )
+        gproxy.start()
+
+        browser = self._get_new_browser(run_path, gproxy.ip, gproxy.port)
+
+        success = False
+        try:
+            account = self._handle_registration(browser=browser)
+            success = True
+            return models.AccountRegistrationResult(
+                jagex_account=account,
+                transfer_stats=gproxy.transfer_stats,
+                duration=timedelta(seconds=time.monotonic() - start_time),
+            )
+        finally:
+            self._cleanup(
+                run_path=run_path, browser=browser, gproxy=gproxy, update_primary_cache=success
+            )
